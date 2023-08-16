@@ -1,0 +1,417 @@
+# WINRM_PASSWORD="$(python3 -m keyring get hyperv01.homelab.somemissing.info administrator | tr -d '\n' | base64)" envsubst < deploy.yaml | kubectl apply -f -
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hyperv-csi-system
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hyperv-csi
+  namespace: hyperv-csi-system
+
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: external-provisioner-runner
+rules:
+  # The following rule should be uncommented for plugins that require secrets
+  # for provisioning.
+  # - apiGroups: [""]
+  #   resources: ["secrets"]
+  #   verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Access to volumeattachments is only needed when the CSI driver
+  # has the PUBLISH_UNPUBLISH_VOLUME controller capability.
+  # In that case, external-provisioner will watch volumeattachments
+  # to determine when it is safe to delete a volume.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  # (Alpha) Access to referencegrants is only needed when the CSI driver
+  # has the CrossNamespaceVolumeDataSource controller capability.
+  # In that case, external-provisioner requires "get", "list", "watch"
+  # permissions  for "referencegrants" on "gateway.networking.k8s.io".
+  #- apiGroups: ["gateway.networking.k8s.io"]
+  #  resources: ["referencegrants"]
+  #  verbs: ["get", "list", "watch"]
+
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: csi-provisioner-role
+subjects:
+  - kind: ServiceAccount
+    name: hyperv-csi
+    namespace: hyperv-csi-system
+roleRef:
+  kind: ClusterRole
+  name: external-provisioner-runner
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Provisioner must be able to work with endpoints in current namespace
+# if (and only if) leadership election is enabled
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: external-provisioner-cfg
+  namespace: hyperv-csi-system
+rules:
+  # Only one of the following rules for endpoints or leases is required based on
+  # what is set for `--leader-election-type`. Endpoints are deprecated in favor of Leases.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "list", "delete", "update", "create"]
+  # Permissions for CSIStorageCapacity are only needed enabling the publishing
+  # of storage capacity information.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csistoragecapacities"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The GET permissions below are needed for walking up the ownership chain
+  # for CSIStorageCapacity. They are sufficient for deployment via
+  # StatefulSet (only needs to get Pod) and Deployment (needs to get
+  # Pod and then ReplicaSet to find the Deployment).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get"]
+
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: csi-provisioner-role-cfg
+  namespace: hyperv-csi-system
+subjects:
+  - kind: ServiceAccount
+    name: hyperv-csi
+    namespace: hyperv-csi-system
+roleRef:
+  kind: Role
+  name: external-provisioner-cfg
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Attacher must be able to work with PVs, CSINodes and VolumeAttachments
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: external-attacher-runner
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch"]
+#Secret permission is optional.
+#Enable it if you need value from secret.
+#For example, you have key `csi.storage.k8s.io/controller-publish-secret-name` in StorageClass.parameters
+#see https://kubernetes-csi.github.io/docs/secrets-and-credentials.html
+#  - apiGroups: [""]
+#    resources: ["secrets"]
+#    verbs: ["get", "list"]
+
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: csi-attacher-role
+subjects:
+  - kind: ServiceAccount
+    name: hyperv-csi
+    namespace: hyperv-csi-system
+roleRef:
+  kind: ClusterRole
+  name: external-attacher-runner
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Attacher must be able to work with configmaps or leases in the current namespace
+# if (and only if) leadership election is enabled
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: external-attacher-cfg
+  namespace: hyperv-csi-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "list", "delete", "update", "create"]
+
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: csi-attacher-role-cfg
+  namespace: hyperv-csi-system
+subjects:
+  - kind: ServiceAccount
+    name: hyperv-csi
+    namespace: hyperv-csi-system
+roleRef:
+  kind: Role
+  name: external-attacher-cfg
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: hyperv-csi.nijave.github.com
+spec: {}
+
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hyperv
+  annotations:
+    "storageclass.kubernetes.io/is-default-class": "true"
+provisioner: hyperv-csi.nijave.github.com
+parameters:
+  type: hyperv
+reclaimPolicy: Retain
+
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: hyperv-csi
+  namespace: hyperv-csi-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hyperv-csi
+  template:
+    metadata:
+      labels:
+        app: hyperv-csi
+    spec:
+      serviceAccount: hyperv-csi
+      containers:
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v3.5.0
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election"
+            - "--http-endpoint=:8080"
+            - "--v=5"
+          env:
+            - name: ADDRESS
+              value: /run/csi/hyperv-csi.sock
+          imagePullPolicy: "IfNotPresent"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /run/csi
+          ports:
+            - containerPort: 8080
+              name: http-endpoint
+              protocol: TCP
+          livenessProbe:
+            failureThreshold: 1
+            httpGet:
+              path: /healthz/leader-election
+              port: http-endpoint
+            initialDelaySeconds: 10
+            timeoutSeconds: 10
+            periodSeconds: 20
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v3.5.0
+          args:
+            - "--v=5"
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election"
+            - "--http-endpoint=:8081"
+            - "--v=5"
+          env:
+            - name: MY_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: ADDRESS
+              value: /run/csi/hyperv-csi.sock
+          imagePullPolicy: "IfNotPresent"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /run/csi
+          ports:
+            - containerPort: 8081
+              name: http-endpoint
+              protocol: TCP
+          livenessProbe:
+            failureThreshold: 1
+            httpGet:
+              path: /healthz/leader-election
+              port: http-endpoint
+            initialDelaySeconds: 10
+            timeoutSeconds: 10
+            periodSeconds: 20
+        - name: hyperv-csi
+          image: registry.apps.nickv.me/hyperv-csi:latest
+          args:
+            - "-v=8"
+#          command: [sleep, infinity]
+          imagePullPolicy: Always
+          env:
+            - name: WINRM_HOST
+              value: "https://hyperv01.homelab.somemissing.info:5986"
+            - name: WINRM_USER
+              value: administrator
+            - name: WINRM_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: hyperv-csi
+                  key: WINRM_PASSWORD
+            - name: WINRM_CA_FILE_PATH
+              value: /var/run/secrets/winrm.pem
+            - name: CSI_ADDRESS
+              value: /run/csi/hyperv-csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /run/csi
+            - name: secrets
+              readOnly: true
+              mountPath: /var/run/secrets/winrm.pem
+              subPath: WINRM_CA_FILE
+      volumes:
+        - name: socket-dir
+          emptyDir:
+        - name: secrets
+          secret:
+              secretName: hyperv-csi
+
+---
+kind: Secret
+apiVersion: v1
+metadata:
+  name: hyperv-csi
+  namespace: hyperv-csi-system
+type: Opaque
+data:
+  WINRM_PASSWORD: "${WINRM_PASSWORD}"
+  WINRM_CA_FILE: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURTekNDQWpPZ0F3SUJBZ0lRWUZ4b2kxVG5iNWxGcVp0QlZ3bVNlekFOQmdrcWhraUc5dzBCQVFzRkFEQVQKTVJFd0R3WURWUVFEREFob2VYQmxjbll3TVRBZUZ3MHlNakE1TWpjd01qQTJNek5hRncwek1qQTVNalF3TWpFMgpNelJhTUJNeEVUQVBCZ05WQkFNTUNHaDVjR1Z5ZGpBeE1JSUJJakFOQmdrcWhraUc5dzBCQVFFRkFBT0NBUThBCk1JSUJDZ0tDQVFFQXZYMy9TV3puYmNQOEQzclJjeHZ6MU85MWhZcm1xcnFaY3BjQmNudnJZYVE5aEdzKzhEM0sKYXdHRXpUKy9mek1xNUR3bmlLQitHMW41SUY1a2hoaGtQTnBsaVdmeTVjeFV0andCcjdMT29NZnFXb2xQbENoVwpROCtMU2VYbEJ3SmVVYjBjcitGd214U1Bxc0RFRk9wSlZnVUxrenc2VDZtcElBU0t2Yk5Tb2RaUVdmSXpQd2NLClF2REtnZ0s2Qk9ZMXQ1a0F2TENrcHQrWlduUnM4TDdzRkIvVWJHZmVWL1RtbUNkNlhKNll2OU1reUVjQ1AvUFAKT3puQlY2bngvZU9teldsbWxCbm1CbkpwMWY4c3hCbkJvWWEwd0x4WTA0UjRzd3d0cFVOR1JCdlZiZmViRkRZRAo3NkR6b2k0UWtUODZOYVdSNXhDb2hkM2xjQUVUM2Zqck53SURBUUFCbzRHYU1JR1hNQTRHQTFVZER3RUIvd1FFCkF3SUZvREFkQmdOVkhTVUVGakFVQmdnckJnRUZCUWNEQWdZSUt3WUJCUVVIQXdFd05nWURWUjBSQkM4d0xZSUkKYUhsd1pYSjJNREdDSVdoNWNHVnlkakF4TG1odmJXVnNZV0l1YzI5dFpXMXBjM05wYm1jdWFXNW1iekFQQmdOVgpIUk1CQWY4RUJUQURBUUgvTUIwR0ExVWREZ1FXQkJRZDBKVlFiYzJZTWp0OC9ZL05LUUtRNExlUnVUQU5CZ2txCmhraUc5dzBCQVFzRkFBT0NBUUVBYlg5YWxYSTJNYS90VG42ZDZIZjkvZGlBZmZjL3VYT3IraHFpdXRMelhwWDcKWjc2RHZ5azJQc2dYcUZCMWFQSmd1eU81V2hRRU5URjhsWUZnK09JaWVaU0w4aXZCNDB6WVp5dGtBaW9qNzB4UwpvUHNpRE1Qemp2RGVtdE5Qd09za2UvQjEweG8rRU55Q3FKOGplak5GK29MNHI0c2xxT3RnOHZOUjI1YkN5S2JnCkZlRWdQcjBUMVpPWi80ZVRyOVpsMkRCOE5QMUJiVGJ4TXV4VnNRaXZHQzJ6WXg5Mjd5dWhlTGlLd0kramZQZmcKbjR0S3FZVHg3dWg0UUIrNjdKQVJLTGJEWXR4YzVCa1d2bjBLY3E1aHBScVZSS1NuckxrSUFIaGtPYXIzZDBzSApPNU1oRm1TQnBzYlFySWF2NUhEMFBLa3ZCUUJqRTM2L09MQzljb3F1bHc9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  labels:
+    app: hyperv-csi-node
+  name: hyperv-csi-node
+  namespace: hyperv-csi-system
+spec:
+  selector:
+    matchLabels:
+      app: hyperv-csi-node
+  template:
+    metadata:
+      labels:
+        app: hyperv-csi-node
+    spec:
+      containers:
+      - name: node-driver-registrar
+        args:
+          - --csi-address=$(ADDRESS)
+          - --kubelet-registration-path=$(REGISTRATION_PATH)
+          - --v=5
+        env:
+          - name: ADDRESS
+            value: /run/csi/csi.sock
+          - name: KUBE_NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: REGISTRATION_PATH
+            value: /var/lib/kubelet/plugins/hyperv-csi.nijave.github.com/csi.sock
+        image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.8.0
+        imagePullPolicy: Always
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - name: plugin-dir
+            mountPath: /run/csi
+          - name: registration-dir
+            mountPath: /registration
+      - name: hyperv-csi-node
+        image: registry.apps.nickv.me/hyperv-csi:latest
+        args:
+          - -grpc-service=driver
+        env:
+          - name: CSI_ADDRESS
+            value: /run/csi/csi.sock
+          - name: KUBE_NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - name: device-dir
+            mountPath: /dev
+          - name: host-root
+            mountPath: /host
+          - name: kubelet-dir
+            mountPath: /var/lib/kubelet
+            mountPropagation: Bidirectional
+          - name: plugin-dir
+            mountPath: /run/csi
+      hostNetwork: true
+      volumes:
+        - name: device-dir
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/hyperv-csi.nijave.github.com
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
