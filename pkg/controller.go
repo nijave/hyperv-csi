@@ -77,7 +77,7 @@ func (s *HypervCsiController) psRun(ctx context.Context, cmd string) ExecResult 
 	klog.V(8).InfoS("ps command", "command", cmd)
 	exit, err := s.WinrmClient.RunWithContext(ctx, psCommand(cmd), &bytesOut, &bytesOut)
 	psOutput := strings.Trim(bytesOut.String(), "\r\n\t ")
-	klog.V(8).InfoS("ps raw output", "output", psOutput)
+	klog.V(8).InfoS("ps raw output", "rc", exit, "output", psOutput)
 	psOutput = parseCliXml(psOutput)
 
 	return ExecResult{
@@ -92,7 +92,7 @@ func (s *HypervCsiController) makeVolumePath(name string, withExtension bool) st
 	if withExtension {
 		extension = ".vhdx"
 	}
-	return windows.PSSingleQuote.Quote(s.VolumePath + "\\" + name + extension)
+	return windows.PSSingleQuote.Quote(s.VolumePath + "\\pvc-" + name + extension)
 }
 
 // IdentityServer
@@ -201,7 +201,7 @@ func (s *HypervCsiController) CreateVolume(ctx context.Context, request *csi.Cre
 
 	response.Volume.CapacityBytes = capacity
 
-	volumePath := s.makeVolumePath("temp-"+request.Name, true)
+	volumePath := s.makeVolumePath("temp-"+strings.Split(request.Name, "-")[1], true)
 	klog.InfoS("creating volume", "path", volumePath, "size", capacity)
 	// Make a temp volume based on the request ID and rename it to the VHD's GUID. Attached VHD can be located by last portion of GUID on host
 	createVolumeCommand := fmt.Sprintf(`$p = %s; $id = (New-VHD -Path $p -SizeBytes %d -Dynamic).DiskIdentifier.ToLower(); Move-Item $p (Join-Path -Path (Split-Path -Parent $p) -ChildPath "pvc-${id}.vhdx"); echo $id`, volumePath, capacity)
@@ -352,8 +352,15 @@ func (s *HypervCsiController) ControllerPublishVolume(ctx context.Context, reque
 	}
 	klog.InfoS("attaching vhd", "vhd", lastParent, "node", request.NodeId)
 	// Add-VMHardDiskDrive -VMName vmubt2204kube04 -ControllerType SCSI -ControllerNumber 0 -Path "v:\\hyper-v\\virtual hard disks\\pvc-583055da-f7b4-474f-9bea-59d346c21509.vhdx"
-	cmd = fmt.Sprintf("Add-VMHardDiskDrive -VMName %s -ControllerType SCSI -ControllerNumber 0 -Path %s", request.NodeId, s.makeVolumePath(lastParent, false))
+	cmd = fmt.Sprintf("Add-VMHardDiskDrive -VMName %s -ControllerType SCSI -ControllerNumber 0 -Path '%s'", request.NodeId, lastParent)
 	result = s.psRun(ctx, cmd)
+
+	// Idempotence
+	if strings.Contains(result.Output, "The disk is already connect to the virtual machine") {
+		result.ExitCode = 0
+		result.Error = nil
+	}
+
 	if result.ExitCode != 0 && result.Error == nil {
 		result.Error = errors.New("powershell error")
 	}

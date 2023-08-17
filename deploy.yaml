@@ -338,6 +338,10 @@ metadata:
   name: hyperv-csi-node
   namespace: hyperv-csi-system
 spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10
   selector:
     matchLabels:
       app: hyperv-csi-node
