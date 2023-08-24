@@ -210,6 +210,17 @@ parameters:
 reclaimPolicy: Retain
 
 ---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hyperv-xfs
+provisioner: hyperv-csi.nijave.github.com
+parameters:
+  type: hyperv-xfs
+  csi.storage.k8s.io/fstype: xfs
+reclaimPolicy: Retain
+
+---
 kind: Deployment
 apiVersion: apps/v1
 metadata:
@@ -376,6 +387,7 @@ spec:
             mountPath: /registration
       - name: hyperv-csi-node
         image: registry.apps.nickv.me/hyperv-csi:latest
+        imagePullPolicy: Always
         args:
           - -grpc-service=driver
         env:

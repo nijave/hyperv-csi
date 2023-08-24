@@ -4,8 +4,9 @@ kind: PersistentVolumeClaim
 metadata:
   name: foo-pvc
 spec:
-  storageClassName: hyperv
+  storageClassName: hyperv-xfs
   accessModes: [ReadWriteOnce]
+  # volumeMode: Block
   resources:
     requests:
       storage: 8Gi
