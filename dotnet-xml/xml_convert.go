@@ -41,11 +41,3 @@ func DecodeName(name string) string {
 
 	return bufBld.String()
 }
-
-func splitSurrogateChar(u int) (highChar, lowChar rune) {
-	// https://unicodebook.readthedocs.io/unicode_encodings.html#utf-16-surrogate-pairs
-	u -= 0x10000
-	highChar = rune((u>>10)&0x3FF) + 0xD800
-	lowChar = rune(u&0x03FF) + 0xDC00
-	return
-}

@@ -16,20 +16,26 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+	"io"
 	"k8s.io/klog/v2"
 	"strings"
 )
 
+type remotePowerShellRunner interface {
+	RunWithContext(context.Context, string, io.Writer, io.Writer) (int, error)
+}
+
 type HypervCsiController struct {
 	csi.IdentityServer
 	csi.ControllerServer
-	WinrmClient *winrm.Client
+	WinrmClient remotePowerShellRunner
 	VolumePath  string
 }
 
 const driverName = "hyperv-csi.nijave.github.com"
 const driverVersion = "1.0.0"
 const defaultCapacity = 20 // GB
+const volumeFilePrefix = "pv-"
 
 const CliXmlPrefix = "#< CLIXML"
 
@@ -92,7 +98,7 @@ func (s *HypervCsiController) makeVolumePath(name string, withExtension bool) st
 	if withExtension {
 		extension = ".vhdx"
 	}
-	return windows.PSSingleQuote.Quote(s.VolumePath + "\\pvc-" + name + extension)
+	return windows.PSSingleQuote.Quote(s.VolumePath + "\\" + volumeFilePrefix + name + extension)
 }
 
 // IdentityServer
@@ -129,7 +135,7 @@ func (s *HypervCsiController) GetPluginCapabilities(ctx context.Context, request
 func (s *HypervCsiController) ListVolumes(ctx context.Context, request *csi.ListVolumesRequest) (*csi.ListVolumesResponse, error) {
 	logRequest("listing volumes", request)
 
-	listCommand := fmt.Sprintf("Get-Item %s | Select Name", s.makeVolumePath("pv-*", true))
+	listCommand := fmt.Sprintf("Get-Item %s | Select Name", s.makeVolumePath(volumeFilePrefix+"*", true))
 	result := s.psRun(ctx, listCommand)
 
 	if result.ExitCode != 0 || result.Error != nil {
@@ -142,10 +148,10 @@ func (s *HypervCsiController) ListVolumes(ctx context.Context, request *csi.List
 
 	volumeFiles := strings.Split(result.Output, "\r")
 	volumeList := make([]*csi.ListVolumesResponse_Entry, len(volumeFiles))
-	for _, volumeFile := range volumeFiles {
-		volumeList = append(volumeList, &csi.ListVolumesResponse_Entry{
+	for i, volumeFile := range volumeFiles {
+		volumeList[i] = &csi.ListVolumesResponse_Entry{
 			Volume: &csi.Volume{
-				VolumeId:           strings.TrimSuffix(volumeFile, ".vhdx"),
+				VolumeId:           strings.TrimPrefix(strings.TrimSuffix(volumeFile, ".vhdx"), volumeFilePrefix),
 				CapacityBytes:      0,
 				VolumeContext:      nil,
 				ContentSource:      nil,
@@ -155,7 +161,7 @@ func (s *HypervCsiController) ListVolumes(ctx context.Context, request *csi.List
 				PublishedNodeIds: nil, // OPTIONAL
 				VolumeCondition:  nil, // OPTIONAL
 			},
-		})
+		}
 	}
 
 	return &csi.ListVolumesResponse{
@@ -204,16 +210,8 @@ func (s *HypervCsiController) CreateVolume(ctx context.Context, request *csi.Cre
 	volumePath := s.makeVolumePath("temp-"+strings.Split(request.Name, "-")[1], true)
 	klog.InfoS("creating volume", "path", volumePath, "size", capacity)
 	// Make a temp volume based on the request ID and rename it to the VHD's GUID. Attached VHD can be located by last portion of GUID on host
-	createVolumeCommand := fmt.Sprintf(`$p = %s; $id = (New-VHD -Path $p -SizeBytes %d -Dynamic).DiskIdentifier.ToLower(); Move-Item $p (Join-Path -Path (Split-Path -Parent $p) -ChildPath "pvc-${id}.vhdx"); echo $id`, volumePath, capacity)
+	createVolumeCommand := fmt.Sprintf(`$p = %s; $id = (New-VHD -Path $p -SizeBytes %d -Dynamic).DiskIdentifier.ToLower(); Move-Item $p (Join-Path -Path (Split-Path -Parent $p) -ChildPath "%s${id}.vhdx"); echo $id`, volumePath, capacity, volumeFilePrefix)
 	result := s.psRun(ctx, createVolumeCommand)
-
-	// In the unlikely event the Powershell command previously succeeded but there
-	// was an interruption before the result could be returned.
-	// This ensures idempotency.
-	if result.ExitCode != 0 && strings.Contains(result.Output, "(0x80070050)") {
-		klog.Warning("pvc already exists")
-		result.ExitCode = 0
-	}
 
 	if result.ExitCode != 0 {
 		klog.Error(result.Output)

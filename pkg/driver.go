@@ -56,7 +56,7 @@ func (s *HypervCsiDriver) NodePublishVolume(ctx context.Context, req *csi.NodePu
 	if req.GetVolumeCapability() != nil && req.GetVolumeCapability().GetMount() != nil && req.GetVolumeCapability().GetMount().GetFsType() != "" {
 		fsType = req.GetVolumeCapability().GetMount().GetFsType()
 	}
-	klog.Infof("using fstype %s", fsType)
+	klog.V(8).Infof("using fstype %s", fsType)
 
 	// Find block device from pvc ID (vhd id)
 	// TODO probably convert this to not use bitfield/script since that's the only place the dep is used
